@@ -6,16 +6,20 @@ import type {
 } from './descriptors.js'
 import {
   ensureIntegrationsLoaded,
+  filterAvailableCatalogEntries,
+  getAllAnthropicProxies,
   getAllGateways,
   getAllVendors,
   getGateway,
+  getAnthropicProxy,
   getVendor,
   resolveProfileRoute,
 } from './index.js'
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
+import { isFirstPartyAnthropicBaseUrlForEnv } from '../utils/anthropicBaseUrl.js'
 
-export type RouteDescriptor = GatewayDescriptor | VendorDescriptor
+export type RouteDescriptor = GatewayDescriptor | VendorDescriptor | import('./descriptors.js').AnthropicProxyDescriptor
 
 const TRANSPORT_KIND_PROVIDER_TYPE_LABELS: Partial<
   Record<TransportKind, string>
@@ -60,7 +64,7 @@ export function matchHostnameAgainstRouteHosts(
   })
 }
 
-function normalizeComparableBaseUrl(
+export function normalizeComparableBaseUrl(
   baseUrl?: string,
 ): string | null {
   if (!baseUrl?.trim()) {
@@ -75,6 +79,17 @@ function normalizeComparableBaseUrl(
   } catch {
     return baseUrl.trim().replace(/\/+$/, '').toLowerCase() || null
   }
+}
+
+const ZAI_CODING_PLAN_BASE_URL = 'https://api.z.ai/api/coding/paas/v4'
+
+export function isCanonicalZaiCodingPlanBaseUrl(
+  value: string | undefined,
+): boolean {
+  return (
+    normalizeComparableBaseUrl(value) ===
+    normalizeComparableBaseUrl(ZAI_CODING_PLAN_BASE_URL)
+  )
 }
 
 function normalizeHost(
@@ -93,7 +108,7 @@ function normalizeHost(
 
 function getAllRoutes(): RouteDescriptor[] {
   ensureIntegrationsLoaded()
-  return [...getAllGateways(), ...getAllVendors()]
+  return [...getAllGateways(), ...getAllVendors(), ...getAllAnthropicProxies()]
 }
 
 function resolveKnownLocalRouteIdFromBaseUrl(baseUrl?: string): string | null {
@@ -129,7 +144,7 @@ export function getRouteDescriptor(
   routeId: string,
 ): RouteDescriptor | null {
   ensureIntegrationsLoaded()
-  return getGateway(routeId) ?? getVendor(routeId) ?? null
+  return getGateway(routeId) ?? getVendor(routeId) ?? getAnthropicProxy(routeId) ?? null
 }
 
 export function getRouteLabel(
@@ -156,7 +171,11 @@ export function getRouteDefaultModel(
     return descriptor.defaultModel
   }
 
-  const catalogModels = descriptor.catalog?.models ?? []
+  // Same availability filter as the picker/route resolution — the fallback
+  // default must never be a hidden or expired entry.
+  const catalogModels = filterAvailableCatalogEntries(
+    descriptor.catalog?.models ?? [],
+  )
   const defaultEntry =
     catalogModels.find(model => model.default) ?? catalogModels[0]
 
@@ -221,7 +240,10 @@ function hasUsableEnvCredentialValue(
   if (
     envVar === 'OPENAI_API_KEYS' ||
     envVar === 'OPENAI_API_KEY' ||
-    envVar === 'AIMLAPI_API_KEY'
+    envVar === 'AIMLAPI_API_KEY' ||
+    envVar === 'APISMART_API_KEY' ||
+    envVar === 'CONCENTRATE_API_KEY' ||
+    envVar === 'LLMTR_API_KEY'
   ) {
     return hasUsableOpenAICredential(value)
   }
@@ -262,6 +284,16 @@ export function isXaiBaseUrl(value: string | undefined): boolean {
 
   try {
     return new URL(trimmed).hostname.toLowerCase() === 'api.x.ai'
+  } catch {
+    return false
+  }
+}
+
+export function isCanonicalXaiInferenceBaseUrl(value: string | undefined): boolean {
+  if (!value?.trim()) return true
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === 'api.x.ai'
   } catch {
     return false
   }
@@ -365,6 +397,27 @@ export function isFireworksBaseUrl(value: string | undefined): boolean {
   }
 }
 
+export function isLongcatBaseUrl(value: string | undefined): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const url = new URL(trimmed)
+    return (
+      url.protocol === 'https:' &&
+      url.hostname.toLowerCase() === 'api.longcat.chat' &&
+      !url.port &&
+      !url.search &&
+      !url.hash &&
+      /^\/openai(?:\/v1)?(?:\/chat\/completions)?\/?$/.test(url.pathname)
+    )
+  } catch {
+    return false
+  }
+}
+
 export function isClinePassBaseUrl(value: string | undefined): boolean {
   const trimmed = value?.trim()
   if (!trimmed) {
@@ -373,6 +426,157 @@ export function isClinePassBaseUrl(value: string | undefined): boolean {
 
   try {
     return new URL(trimmed).hostname.toLowerCase() === 'api.cline.bot'
+  } catch {
+    return false
+  }
+}
+
+export function isConcentrateBaseUrl(value: string | undefined): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const url = new URL(trimmed)
+    return (
+      url.protocol === 'https:' &&
+      !url.port &&
+      !url.search &&
+      !url.hash &&
+      url.hostname.toLowerCase() === 'api.concentrate.ai'
+    )
+  } catch {
+    return false
+  }
+}
+
+const CONCENTRATE_CANONICAL_INFERENCE_BASE_URL = 'https://api.concentrate.ai/v1'
+
+export function isCanonicalConcentrateInferenceBaseUrl(
+  value: string | undefined,
+): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const canonical = new URL(CONCENTRATE_CANONICAL_INFERENCE_BASE_URL)
+    const candidate = new URL(trimmed)
+    const normalizePath = (pathname: string): string =>
+      pathname.replace(/\/+$/, '') || '/'
+    return (
+      candidate.protocol === 'https:' &&
+      !candidate.port &&
+      !candidate.search &&
+      !candidate.hash &&
+      candidate.hostname.toLowerCase() === canonical.hostname.toLowerCase() &&
+      normalizePath(candidate.pathname) === normalizePath(canonical.pathname)
+    )
+  } catch {
+    return false
+  }
+}
+
+const LLMTR_CANONICAL_INFERENCE_BASE_URL = 'https://llmtr.com/v1'
+
+export function isCanonicalLlmtrInferenceBaseUrl(
+  value: string | undefined,
+): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const canonical = new URL(LLMTR_CANONICAL_INFERENCE_BASE_URL)
+    const candidate = new URL(trimmed)
+    const normalizePath = (pathname: string): string =>
+      pathname.replace(/\/+$/, '') || '/'
+    return (
+      candidate.protocol === 'https:' &&
+      !candidate.port &&
+      !candidate.search &&
+      !candidate.hash &&
+      candidate.hostname.toLowerCase() === canonical.hostname.toLowerCase() &&
+      normalizePath(candidate.pathname) === normalizePath(canonical.pathname)
+    )
+  } catch {
+    return false
+  }
+}
+
+export function getConcentrateBaseUrlOverride(
+  processEnv: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const openAIBaseUrl = processEnv.OPENAI_BASE_URL?.trim()
+  if (isConcentrateBaseUrl(openAIBaseUrl)) {
+    return openAIBaseUrl
+  }
+
+  const openAIApiBase = processEnv.OPENAI_API_BASE?.trim()
+  if (isConcentrateBaseUrl(openAIApiBase)) {
+    return openAIApiBase
+  }
+
+  return undefined
+}
+
+/**
+ * Host-scoped ApiSmart route match. Used for env-only conflict detection and
+ * base-URL route identity (including `/v1/chat/completions` path suffixes that
+ * still target the ApiSmart host). Credential forwarding and ambient-key
+ * withholding use {@link isCanonicalApismartInferenceBaseUrl} instead — same
+ * split AIMLAPI uses between host match and canonical inference URL.
+ */
+export function isApismartBaseUrl(value: string | undefined): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const parsed = new URL(trimmed)
+    return (
+      parsed.protocol === 'https:' &&
+      !parsed.port &&
+      parsed.hostname.toLowerCase() === 'gw.apismart.ai'
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Exact documented ApiSmart inference endpoint (`https://gw.apismart.ai/v1`).
+ * Path suffixes (`/v1/models`), alternate versions (`/v2`), and host-only URLs
+ * are not canonical — forwarding dedicated credentials there would send the
+ * key to the wrong request/discovery path.
+ */
+const APISMART_CANONICAL_INFERENCE_BASE_URL = 'https://gw.apismart.ai/v1'
+
+export function isCanonicalApismartInferenceBaseUrl(
+  value: string | undefined,
+): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const canonical = new URL(APISMART_CANONICAL_INFERENCE_BASE_URL)
+    const candidate = new URL(trimmed)
+    const normalizePath = (pathname: string): string =>
+      pathname.replace(/\/+$/, '') || '/'
+    return (
+      candidate.protocol === 'https:' &&
+      !candidate.port &&
+      !candidate.search &&
+      !candidate.hash &&
+      candidate.hostname.toLowerCase() === canonical.hostname.toLowerCase() &&
+      normalizePath(candidate.pathname) === normalizePath(canonical.pathname)
+    )
   } catch {
     return false
   }
@@ -483,6 +687,23 @@ export function getFireworksBaseUrlOverride(
 
   return undefined
 }
+
+export function getLongcatBaseUrlOverride(
+  processEnv: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const openAIBaseUrl = processEnv.OPENAI_BASE_URL?.trim()
+  if (isLongcatBaseUrl(openAIBaseUrl)) {
+    return openAIBaseUrl
+  }
+
+  const openAIApiBase = processEnv.OPENAI_API_BASE?.trim()
+  if (isLongcatBaseUrl(openAIApiBase)) {
+    return openAIApiBase
+  }
+
+  return undefined
+}
+
 export function getMiniMaxBaseUrlOverride(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
@@ -550,6 +771,30 @@ function hasConflictingOpenAIBaseUrlForRoute(
   )
 }
 
+function hasExplicitOpenAIBaseUrlForRoute(
+  processEnv: NodeJS.ProcessEnv,
+  isRouteBaseUrl: (value: string | undefined) => boolean,
+): boolean {
+  if (hasNonEmptyEnvValue(processEnv.OPENAI_BASE_URL)) {
+    return isRouteBaseUrl(processEnv.OPENAI_BASE_URL)
+  }
+
+  return (
+    hasNonEmptyEnvValue(processEnv.OPENAI_API_BASE) &&
+    isRouteBaseUrl(processEnv.OPENAI_API_BASE)
+  )
+}
+
+function hasCompetingApismartCredential(
+  processEnv: NodeJS.ProcessEnv,
+  isRouteBaseUrl: (value: string | undefined) => boolean,
+): boolean {
+  return (
+    hasUsableOpenAICredential(processEnv.APISMART_API_KEY) &&
+    !hasExplicitOpenAIBaseUrlForRoute(processEnv, isRouteBaseUrl)
+  )
+}
+
 function isAimlapiBaseUrl(baseUrl?: string): boolean {
   return normalizeHost(baseUrl) === 'api.aimlapi.com'
 }
@@ -586,6 +831,7 @@ export function hasAimlapiEnvOnlyProviderIntent(
 ): boolean {
   return (
     hasUsableOpenAICredential(processEnv.AIMLAPI_API_KEY) &&
+    !hasCompetingApismartCredential(processEnv, isAimlapiBaseUrl) &&
     !hasConflictingOpenAIBaseUrlForRoute(processEnv, isAimlapiBaseUrl) &&
     hasNoExplicitNonOpenAIProvider(processEnv)
   )
@@ -597,6 +843,7 @@ export function hasXaiEnvOnlyProviderIntent(
   return (
     hasNonEmptyEnvValue(processEnv.XAI_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.CLINE_API_KEY) &&
+    !hasCompetingApismartCredential(processEnv, isXaiBaseUrl) &&
     !hasConflictingOpenAIBaseUrlForRoute(processEnv, isXaiBaseUrl) &&
     hasNoExplicitNonOpenAICompatibleProvider(processEnv)
   )
@@ -618,6 +865,7 @@ export function hasMiniMaxEnvOnlyProviderIntent(
       (!hasAnyUsableOpenAICredential(processEnv) &&
         !hasNonEmptyEnvValue(processEnv.XAI_API_KEY) &&
         !hasNonEmptyEnvValue(processEnv.CLINE_API_KEY) &&
+        !hasCompetingApismartCredential(processEnv, isMiniMaxBaseUrl) &&
         hasNoExplicitNonOpenAICompatibleProvider(processEnv)))
   )
 }
@@ -631,6 +879,7 @@ export function hasVeniceEnvOnlyProviderIntent(
     !hasNonEmptyEnvValue(processEnv.XAI_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.MINIMAX_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.CLINE_API_KEY) &&
+    !hasCompetingApismartCredential(processEnv, isVeniceBaseUrl) &&
     !hasConflictingOpenAIBaseUrlForRoute(processEnv, isVeniceBaseUrl) &&
     hasNoExplicitNonOpenAICompatibleProvider(processEnv)
   )
@@ -646,6 +895,7 @@ export function hasXiaomiMimoEnvOnlyProviderIntent(
     !hasNonEmptyEnvValue(processEnv.MINIMAX_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.VENICE_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.CLINE_API_KEY) &&
+    !hasCompetingApismartCredential(processEnv, isXiaomiMimoBaseUrl) &&
     !hasConflictingOpenAIBaseUrlForRoute(processEnv, isXiaomiMimoBaseUrl) &&
     hasNoExplicitNonOpenAICompatibleProvider(processEnv)
   )
@@ -661,7 +911,9 @@ export function hasNearaiEnvOnlyProviderIntent(
     !hasNonEmptyEnvValue(processEnv.VENICE_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.MIMO_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.FIREWORKS_API_KEY) &&
+    !hasNonEmptyEnvValue(processEnv.LONGCAT_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.CLINE_API_KEY) &&
+    !hasCompetingApismartCredential(processEnv, isNearaiBaseUrl) &&
     !hasConflictingOpenAIBaseUrlForRoute(processEnv, isNearaiBaseUrl) &&
     hasNoExplicitNonOpenAICompatibleProvider(processEnv)
   )
@@ -682,8 +934,29 @@ export function hasFireworksEnvOnlyProviderIntent(
     !hasNonEmptyEnvValue(processEnv.VENICE_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.MIMO_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.NEARAI_API_KEY) &&
+    !hasNonEmptyEnvValue(processEnv.LONGCAT_API_KEY) &&
     !hasNonEmptyEnvValue(processEnv.CLINE_API_KEY) &&
+    !hasCompetingApismartCredential(processEnv, isFireworksBaseUrl) &&
     !hasConflictingOpenAIBaseUrlForRoute(processEnv, isFireworksBaseUrl) &&
+    hasNoExplicitNonOpenAICompatibleProvider(processEnv)
+  )
+}
+
+export function hasLongcatEnvOnlyProviderIntent(
+  processEnv: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    hasNonEmptyEnvValue(processEnv.LONGCAT_API_KEY) &&
+    !hasAnyUsableOpenAICredential(processEnv) &&
+    !hasNonEmptyEnvValue(processEnv.XAI_API_KEY) &&
+    !hasNonEmptyEnvValue(processEnv.MINIMAX_API_KEY) &&
+    !hasNonEmptyEnvValue(processEnv.VENICE_API_KEY) &&
+    !hasNonEmptyEnvValue(processEnv.MIMO_API_KEY) &&
+    !hasNonEmptyEnvValue(processEnv.NEARAI_API_KEY) &&
+    !hasNonEmptyEnvValue(processEnv.FIREWORKS_API_KEY) &&
+    !hasNonEmptyEnvValue(processEnv.CLINE_API_KEY) &&
+    !hasCompetingApismartCredential(processEnv, isLongcatBaseUrl) &&
+    !hasConflictingOpenAIBaseUrlForRoute(processEnv, isLongcatBaseUrl) &&
     hasNoExplicitNonOpenAICompatibleProvider(processEnv)
   )
 }
@@ -698,8 +971,39 @@ export function hasClinePassEnvOnlyProviderIntent(
 ): boolean {
   return (
     hasNonEmptyEnvValue(processEnv.CLINE_API_KEY) &&
+    !hasCompetingApismartCredential(processEnv, isClinePassBaseUrl) &&
     !hasConflictingOpenAIBaseUrlForRoute(processEnv, isClinePassBaseUrl) &&
     hasNoExplicitNonOpenAICompatibleProvider(processEnv)
+  )
+}
+
+export function hasApismartEnvOnlyProviderIntent(
+  processEnv: NodeJS.ProcessEnv = process.env,
+): boolean {
+  // Match AIMLAPI: ApiSmart is an OpenAI-compatible dedicated-key route, so a
+  // lingering CLAUDE_CODE_USE_OPENAI=1 from a prior OpenAI session must not
+  // suppress env-only ApiSmart identity. Only true non-OpenAI providers
+  // (Gemini/GitHub/Bedrock/...) block this intent.
+  return (
+    hasUsableOpenAICredential(processEnv.APISMART_API_KEY) &&
+    !hasConflictingOpenAIBaseUrlForRoute(processEnv, isApismartBaseUrl) &&
+    hasNoExplicitNonOpenAIProvider(processEnv)
+  )
+}
+
+export function hasConcentrateEnvOnlyProviderIntent(
+  processEnv: NodeJS.ProcessEnv = process.env,
+): boolean {
+  // The dedicated credential explicitly selects Concentrate. Base/model
+  // overrides alone are configuration details, not route identity: treating
+  // them as identity would let a stale optional setting override a valid
+  // generic OpenAI configuration.
+  return (
+    hasUsableOpenAICredential(processEnv.CONCENTRATE_API_KEY) &&
+    !hasConflictingOpenAIBaseUrlForRoute(processEnv, isConcentrateBaseUrl) &&
+    !(processEnv.CLAUDE_CODE_USE_OPENAI !== undefined &&
+      !isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI)) &&
+    hasNoExplicitNonOpenAIProvider(processEnv)
   )
 }
 
@@ -713,7 +1017,10 @@ export function resolveEnvOnlyProviderRouteId(
   | 'xiaomi-mimo'
   | 'nearai'
   | 'fireworks'
+  | 'longcat'
   | 'clinepass'
+  | 'apismart'
+  | 'concentrate'
   | null {
   if (
     hasMiniMaxRouteIntent(processEnv) &&
@@ -750,8 +1057,20 @@ export function resolveEnvOnlyProviderRouteId(
     return 'fireworks'
   }
 
+  if (hasLongcatEnvOnlyProviderIntent(processEnv)) {
+    return 'longcat'
+  }
+
   if (hasClinePassEnvOnlyProviderIntent(processEnv)) {
     return 'clinepass'
+  }
+
+  if (hasApismartEnvOnlyProviderIntent(processEnv)) {
+    return 'apismart'
+  }
+
+  if (hasConcentrateEnvOnlyProviderIntent(processEnv)) {
+    return 'concentrate'
   }
 
   return null
@@ -818,6 +1137,34 @@ export function resolveRouteCredentialValue(
     return undefined
   }
 
+  // ApiSmart's host is intentionally sufficient for route identity, but its
+  // dedicated credential is valid only for the documented inference base.
+  // Keep those concerns separate so discovery, versioned, or custom paths on
+  // the same host cannot receive the bearer token.
+  if (
+    routeId === 'apismart' &&
+    options?.baseUrl !== undefined &&
+    !isCanonicalApismartInferenceBaseUrl(options.baseUrl)
+  ) {
+    return undefined
+  }
+  // Concentrate is the same: route identity is host-scoped, but the dedicated
+  // credential is only valid for the documented /v1 inference endpoint.
+  if (
+    routeId === 'concentrate' &&
+    options?.baseUrl !== undefined &&
+    !isCanonicalConcentrateInferenceBaseUrl(options.baseUrl)
+  ) {
+    return undefined
+  }
+  if (
+    routeId === 'llmtr' &&
+    options?.baseUrl !== undefined &&
+    !isCanonicalLlmtrInferenceBaseUrl(options.baseUrl)
+  ) {
+    return undefined
+  }
+
   return getRouteCredentialValue(routeId, processEnv)
 }
 
@@ -829,7 +1176,10 @@ export function routeSupportsCustomHeaders(
     return false
   }
 
-  return descriptor.transportConfig.openaiShim?.supportsAuthHeaders === true
+  return (
+    descriptor.transportConfig.openaiShim?.supportsAuthHeaders === true ||
+    descriptor.transportConfig.anthropicProxy?.supportsCustomHeaders === true
+  )
 }
 
 export function routeShowsAuthHeaderValue(routeId: string): boolean {
@@ -922,6 +1272,16 @@ export function resolveRouteIdFromBaseUrl(
       normalizedBaseUrl &&
       normalizedDefaultBaseUrl === normalizedBaseUrl
     ) {
+      // LLMTR's dedicated credential and fixed transport contract are valid
+      // only for the exact inference URL. The generic comparable-URL helper
+      // intentionally ignores query/hash components for other providers, but a
+      // query-bearing LLMTR URL is a retargeted/custom endpoint.
+      if (
+        route.id === 'llmtr' &&
+        !isCanonicalLlmtrInferenceBaseUrl(baseUrl)
+      ) {
+        continue
+      }
       return route.id
     }
   }
@@ -933,7 +1293,15 @@ export function resolveRouteIdFromBaseUrl(
         // bare hostname match isn't enough for the Workers AI route — require
         // the Workers AI path (/client/v4/accounts/<id>/ai/v1). Otherwise an
         // unrelated Cloudflare API URL would inherit Workers-AI routing.
-        if (route.id === 'cloudflare' && !isCloudflareBaseUrl(baseUrl)) {
+        if (
+          (route.id === 'cloudflare' && !isCloudflareBaseUrl(baseUrl)) ||
+          (route.id === 'longcat' && !isLongcatBaseUrl(baseUrl)) ||
+          (route.id === 'apismart' && !isApismartBaseUrl(baseUrl)) ||
+          (route.id === 'concentrate' &&
+            !isCanonicalConcentrateInferenceBaseUrl(baseUrl)) ||
+          (route.id === 'llmtr' &&
+            !isCanonicalLlmtrInferenceBaseUrl(baseUrl))
+        ) {
           continue
         }
         return route.id
@@ -966,6 +1334,18 @@ function profileRouteHonorsBaseUrlBoundary(
   if (routeId === 'cloudflare') {
     return isCloudflareBaseUrl(baseUrl)
   }
+  if (routeId === 'longcat') {
+    return isLongcatBaseUrl(baseUrl)
+  }
+  if (routeId === 'apismart') {
+    return isApismartBaseUrl(baseUrl)
+  }
+  if (routeId === 'llmtr') {
+    return isCanonicalLlmtrInferenceBaseUrl(baseUrl)
+  }
+  if (routeId === 'zai') {
+    return !baseUrl || isCanonicalZaiCodingPlanBaseUrl(baseUrl)
+  }
   return true
 }
 
@@ -992,19 +1372,44 @@ export function resolveActiveRouteIdFromEnv(
     return 'vertex'
   }
 
+  // A Bearer token explicitly selects the custom Anthropic proxy contract,
+  // even if the host also belongs to a known OpenAI-compatible route. Keep
+  // native x-api-key configurations on those known routes for compatibility.
+  const anthropicBaseUrl = hasNonEmptyEnvValue(processEnv.ANTHROPIC_BASE_URL)
+    ? processEnv.ANTHROPIC_BASE_URL
+    : undefined
+  const knownAnthropicRoute = resolveRouteIdFromBaseUrl(anthropicBaseUrl)
+  if (
+    !isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI) &&
+    anthropicBaseUrl &&
+    hasNonEmptyEnvValue(processEnv.ANTHROPIC_MODEL) &&
+    (hasNonEmptyEnvValue(processEnv.ANTHROPIC_AUTH_TOKEN) ||
+      hasNonEmptyEnvValue(processEnv.ANTHROPIC_API_KEY)) &&
+    !isFirstPartyAnthropicBaseUrlForEnv(processEnv) &&
+    (hasNonEmptyEnvValue(processEnv.ANTHROPIC_AUTH_TOKEN) ||
+      knownAnthropicRoute === 'custom-anthropic' ||
+      !knownAnthropicRoute)
+  ) {
+    return 'custom-anthropic'
+  }
+
   const envOnlyRouteId = resolveEnvOnlyProviderRouteId(processEnv)
   if (envOnlyRouteId) return envOnlyRouteId
 
   if (isEnvTruthy(processEnv.CLAUDE_CODE_USE_OPENAI)) {
-    const baseUrl =
-      processEnv.OPENAI_BASE_URL ?? processEnv.OPENAI_API_BASE
+    const baseUrl = hasNonEmptyEnvValue(processEnv.OPENAI_BASE_URL)
+      ? processEnv.OPENAI_BASE_URL
+      : hasNonEmptyEnvValue(processEnv.OPENAI_API_BASE)
+        ? processEnv.OPENAI_API_BASE
+        : undefined
+    const hasExplicitBaseUrl = baseUrl !== undefined
     const matchedRoute = resolveRouteIdFromBaseUrl(baseUrl)
 
     if (matchedRoute) {
       return matchedRoute
     }
 
-    if (options?.activeProfileProvider) {
+    if (!hasExplicitBaseUrl && options?.activeProfileProvider) {
       const route = resolveProfileRoute(options.activeProfileProvider)
       if (
         route.routeId !== 'unknown-fallback' &&
@@ -1039,7 +1444,7 @@ export function resolveActiveRouteIdFromEnv(
     return 'custom'
   }
 
-  if (options?.activeProfileProvider) {
+  if (!anthropicBaseUrl && options?.activeProfileProvider) {
     const route = resolveProfileRoute(options.activeProfileProvider)
     if (
       route.routeId !== 'unknown-fallback' &&

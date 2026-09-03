@@ -26,8 +26,19 @@ export type ToolFailureLoopGuardState = {
   pathCounts: Map<string, number>
 }
 
+type ToolFailureLoopGuardAdvisory = {
+  message: string
+  threshold: number
+  toolName: string
+  errorCategory: string
+}
+
 export type ToolFailureLoopGuardDecision =
-  | { tripped: false }
+  | { tripped: false; advisories?: undefined }
+  | {
+      tripped: false
+      advisories: ToolFailureLoopGuardAdvisory[]
+    }
   | {
       tripped: true
       message: string
@@ -122,10 +133,23 @@ export function updateToolFailureLoopGuard(params: {
     resetPersistentToolSignatures(params.state, toolName)
   }
 
+  // Parallel failures in one model turn must only count once per key so the
+  // model can observe the batch and adapt. Cross-turn accumulation still trips.
+  const seenPersistentSignatures = new Set<string>()
+  const seenPaths = new Set<string>()
+  const seenSignatures = new Set<string>()
+  const seenCategories = new Set<string>()
+
+  const advisories: ToolFailureLoopGuardAdvisory[] = []
   for (const failure of failures) {
-    const persistentSignatureCount = incrementCounter(
+    const persistentSignature = `${failure.toolName}\0${failure.errorCategory}`
+    const isNewPersistentSignature = !seenPersistentSignatures.has(
+      persistentSignature,
+    )
+    const persistentSignatureCount = incrementCounterOnce(
       params.state.persistentSignatureCounts,
-      `${failure.toolName}\0${failure.errorCategory}`,
+      persistentSignature,
+      seenPersistentSignatures,
     )
 
     if (persistentSignatureCount >= threshold) {
@@ -143,6 +167,23 @@ export function updateToolFailureLoopGuard(params: {
         }),
       }
     }
+
+    if (
+      isNewPersistentSignature &&
+      threshold > 1 &&
+      persistentSignatureCount === threshold - 1
+    ) {
+      advisories.push({
+        threshold,
+        toolName: failure.toolName,
+        errorCategory: failure.errorCategory,
+        message: createAdvisoryMessage({
+          threshold,
+          toolName: failure.toolName,
+          errorCategory: failure.errorCategory,
+        }),
+      })
+    }
   }
 
   for (const failure of failures) {
@@ -150,7 +191,11 @@ export function updateToolFailureLoopGuard(params: {
       continue
     }
 
-    const pathCount = incrementCounter(params.state.pathCounts, failure.path)
+    const pathCount = incrementCounterOnce(
+      params.state.pathCounts,
+      failure.path,
+      seenPaths,
+    )
     if (pathCount >= threshold) {
       return {
         tripped: true,
@@ -168,17 +213,22 @@ export function updateToolFailureLoopGuard(params: {
 
   if (hasSuccess) {
     resetToolFailureLoopGuard(params.state, successfulMutationPaths)
-    return { tripped: false }
+    return advisories.length > 0
+      ? { tripped: false, advisories }
+      : { tripped: false }
   }
 
   for (const failure of failures) {
-    const signatureCount = incrementCounter(
+    const signature = `${failure.toolName}\0${failure.errorCategory}`
+    const signatureCount = incrementCounterOnce(
       params.state.signatureCounts,
-      `${failure.toolName}\0${failure.errorCategory}`,
+      signature,
+      seenSignatures,
     )
-    const categoryCount = incrementCounter(
+    const categoryCount = incrementCounterOnce(
       params.state.categoryCounts,
       failure.errorCategory,
+      seenCategories,
     )
     if (signatureCount >= threshold) {
       return {
@@ -211,7 +261,9 @@ export function updateToolFailureLoopGuard(params: {
     }
   }
 
-  return { tripped: false }
+  return advisories.length > 0
+    ? { tripped: false, advisories }
+    : { tripped: false }
 }
 
 type ToolResultBlockLike = {
@@ -424,6 +476,18 @@ function incrementCounter(counts: Map<string, number>, key: string): number {
   return next
 }
 
+function incrementCounterOnce(
+  counts: Map<string, number>,
+  key: string,
+  seenThisTurn: Set<string>,
+): number {
+  if (seenThisTurn.has(key)) {
+    return counts.get(key) ?? 0
+  }
+  seenThisTurn.add(key)
+  return incrementCounter(counts, key)
+}
+
 function createTripMessage(
   detail:
     | { kind: 'path'; threshold: number; path: string }
@@ -437,11 +501,11 @@ function createTripMessage(
 ): string {
   let reason: string
   if (detail.kind === 'path') {
-    reason = `The path \`${detail.path}\` failed ${detail.threshold} times.`
+    reason = `The path \`${getTripPath(detail.path)}\` failed ${detail.threshold} times.`
   } else if (detail.kind === 'signature') {
-    reason = `\`${detail.toolName}\` failed ${detail.threshold} times with \`${detail.errorCategory}\`.`
+    reason = `\`${getAdvisoryToolName(detail.toolName)}\` failed ${detail.threshold} times with \`${getAdvisoryErrorCategory(detail.errorCategory)}\`.`
   } else {
-    reason = `Tool calls failed ${detail.threshold} times with \`${detail.errorCategory}\`.`
+    reason = `Tool calls failed ${detail.threshold} times with \`${getAdvisoryErrorCategory(detail.errorCategory)}\`.`
   }
 
   return [
@@ -449,4 +513,42 @@ function createTripMessage(
     '',
     `${reason} Please inspect permissions, path, or tool schema before retrying.`,
   ].join('\n')
+}
+
+function createAdvisoryMessage({
+  threshold,
+  toolName,
+  errorCategory,
+}: {
+  threshold: number
+  toolName: string
+  errorCategory: string
+}): string {
+  return [
+    'Warning: repeated tool failures are close to stopping this query.',
+    '',
+    `\`${getAdvisoryToolName(toolName)}\` failed ${threshold - 1}/${threshold} times with \`${getAdvisoryErrorCategory(errorCategory)}\`. ` +
+      'One more matching failure will stop the query. Try a different tool, or verify the path, permissions, and tool inputs before retrying.',
+  ].join('\n')
+}
+
+function getAdvisoryToolName(toolName: string): string {
+  return /^[A-Za-z0-9_.:-]+$/.test(toolName) ? toolName : 'unknown tool'
+}
+
+function getAdvisoryErrorCategory(errorCategory: string): string {
+  return [
+    'InputValidationError',
+    'NoSuchTool',
+    'PermissionError',
+    'NotFound',
+    'FileWriteError',
+  ].includes(errorCategory)
+    ? errorCategory
+    : 'unknown error'
+}
+
+function getTripPath(path: string): string {
+  const sanitized = path.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}`]/gu, '')
+  return sanitized === '' ? 'unknown path' : sanitized
 }

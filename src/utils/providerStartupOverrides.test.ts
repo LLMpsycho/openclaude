@@ -1,9 +1,14 @@
 import { describe, expect, mock, test } from 'bun:test'
 
-import { clearStartupProviderOverrides } from './providerStartupOverrides.js'
+async function importStartupOverridesForTest() {
+  return import(
+    `./providerStartupOverrides.ts?startupOverridesTest=${Date.now()}-${Math.random()}`
+  )
+}
 
 describe('clearStartupProviderOverrides', () => {
-  test('removes stale provider env from user settings and global config env', () => {
+  test('removes stale provider env from user settings and global config env', async () => {
+    const { clearStartupProviderOverrides } = await importStartupOverridesForTest()
     const updateUserSettings = mock(() => ({ error: null }))
     const saveConfig = mock((updater: (current: {
       env: Record<string, string>
@@ -15,8 +20,11 @@ describe('clearStartupProviderOverrides', () => {
           OPENAI_MODEL: 'minimax-m2.7',
           OPENAI_API_KEYS: 'pool-a,pool-b',
           OPENAI_API_KEY: 'single-key',
+          LLMTR_API_KEY: 'llmtr-key',
           MINIMAX_API_KEY: 'sk-minimax',
           VENICE_API_KEY: 'sk-venice',
+          LONGCAT_API_KEY: 'sk-longcat',
+          ANTHROPIC_AUTH_TOKEN: 'stale-proxy-token',
           KEEP_ME: '1',
         },
       }),
@@ -37,8 +45,11 @@ describe('clearStartupProviderOverrides', () => {
           OPENAI_MODEL: undefined,
           OPENAI_API_KEYS: undefined,
           OPENAI_API_KEY: undefined,
+          LLMTR_API_KEY: undefined,
           MINIMAX_API_KEY: undefined,
           VENICE_API_KEY: undefined,
+          LONGCAT_API_KEY: undefined,
+          ANTHROPIC_AUTH_TOKEN: undefined,
         }),
       }),
     )

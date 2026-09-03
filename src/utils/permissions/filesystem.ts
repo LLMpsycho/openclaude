@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto'
 import ignore from 'ignore'
 import memoize from 'lodash-es/memoize.js'
 import { homedir, tmpdir } from 'os'
-import { join, normalize, posix, sep } from 'path'
+import { dirname, join, normalize, posix, sep } from 'path'
 import { hasAutoMemPathOverride, isAutoMemPath } from 'src/memdir/paths.js'
 import { isAgentMemoryPath } from 'src/tools/AgentTool/agentMemory.js'
 import {
@@ -15,12 +15,17 @@ import type { z } from 'zod/v4'
 import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
 import { PRODUCT_DISPLAY_NAME } from '../../constants/product.js'
 import { checkStatsigFeatureGate_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
-import type { AnyObject, Tool, ToolPermissionContext } from '../../Tool.js'
+import type {
+  AnyObject,
+  Tool,
+  ToolPermissionContext,
+  ToolUseContext,
+} from '../../Tool.js'
 import { FILE_READ_TOOL_NAME } from '../../tools/FileReadTool/prompt.js'
 import { getCwd } from '../cwd.js'
 import { logForDebugging } from '../debug.js'
 import { getClaudeConfigHomeDir } from '../envUtils.js'
-import { isFsInaccessible } from '../errors.js'
+import { isENOENT, isFsInaccessible } from '../errors.js'
 import { isMemoryWriteApprovalRequired } from '../governancePolicy.js'
 import {
   getFsImplementation,
@@ -32,7 +37,13 @@ import {
   getDirectoryForPath,
   sanitizePath,
 } from '../path.js'
-import { getPlanSlug, getPlansDirectory } from '../plans.js'
+import {
+  AGENT_PLANS_SUBDIR,
+  getPlanSlug,
+  getPlansDirectory,
+  isCanonicalPlanFileEncoding,
+  isResolvedPathWithinPlansDir,
+} from '../plans.js'
 import { getPlatform } from '../platform.js'
 import { getProjectDir } from '../sessionStorage.js'
 import { SETTING_SOURCES } from '../settings/constants.js'
@@ -253,17 +264,60 @@ function isClaudeConfigFilePath(filePath: string): boolean {
   )
 }
 
-// Check if file is the plan file for the current session
-function isSessionPlanFile(absolutePath: string): boolean {
-  // Check if path is a plan file for this session (main or agent-specific)
-  // Main plan file: {plansDir}/{planSlug}.md
-  // Agent plan file: {plansDir}/{planSlug}-agent-{agentId}.md
-  const expectedPrefix = join(getPlansDirectory(), getPlanSlug())
+// Pure predicate for the two legitimate plan-file shapes getPlanFilePath emits:
+//   Main plan file:  {plansDir}/{planSlug}.md
+//   Agent plan file: {plansDir}/{AGENT_PLANS_SUBDIR}/{planSlug}-agent-{agentId}.md
+// Anchored on those exact delimiters. A bare startsWith on {plansDir}/{slug}
+// also matches any sibling whose name merely begins with the slug
+// ({slug}nova.md, {slug}-other.md, {slug}dir/x.md), which would silently
+// auto-allow reads and un-prompted writes to files that are not this session's
+// plan. Exported for testing.
+export function isPlanFilePath(
+  plansDir: string,
+  planSlug: string,
+  absolutePath: string,
+): boolean {
+  const expectedPrefix = join(plansDir, planSlug)
   // SECURITY: Normalize to prevent path traversal bypasses via .. segments
   const normalizedPath = normalize(absolutePath)
-  return (
-    normalizedPath.startsWith(expectedPrefix) && normalizedPath.endsWith('.md')
-  )
+  if (!normalizedPath.endsWith('.md')) {
+    return false
+  }
+  if (normalizedPath === expectedPrefix + '.md') {
+    return true
+  }
+  // Agent plans live in the dedicated subdirectory that keeps their escaped
+  // filenames from colliding with legacy plans written directly under plansDir.
+  const agentPrefix = join(plansDir, AGENT_PLANS_SUBDIR, `${planSlug}-agent-`)
+  if (!normalizedPath.startsWith(agentPrefix)) {
+    return false
+  }
+  // SECURITY: The remainder must be exactly the canonical encoded agent id that
+  // getPlanFilePath emits, followed by `.md`. Anchoring on the canonical
+  // encoding (isCanonicalPlanFileEncoding) rejects every path the encoder never
+  // produces: the bare prefix and the malformed {slug}-agent-.md; a lookalike
+  // sibling *directory* ({subdir}/{slug}-agent-evil/anything.md, whose raw `/`
+  // is not canonical); and raw-`%` lookalikes such as {slug}-agent-writer@100%.md
+  // (canonical form ...writer@100%25.md) or ...writer@a%2Fb.md (canonical form
+  // ...writer@a%252Fb.md). Any of those would otherwise be auto-allowed for
+  // unprompted read/write even though they are not this session's plan file.
+  const encodedAgentId = normalizedPath.slice(agentPrefix.length, -'.md'.length)
+  return isCanonicalPlanFileEncoding(encodedAgentId)
+}
+
+// Check if file is the plan file for the current session
+function isSessionPlanFile(absolutePath: string): boolean {
+  const plansDir = getPlansDirectory()
+  if (!isPlanFilePath(plansDir, getPlanSlug(), absolutePath)) {
+    return false
+  }
+  // SECURITY: the plan-file carve-out grants unprompted read/write on a lexical
+  // name match, so a symlinked path component (e.g. a symlinked `agents`
+  // subdirectory, or a symlinked plans directory) could redirect the real
+  // target outside the plans directory. Resolve the deepest existing ancestor
+  // of the candidate and require it to stay within the *resolved* plans
+  // directory before honoring the carve-out. Shares the recovery-path helper.
+  return isResolvedPathWithinPlansDir(absolutePath, plansDir)
 }
 
 /**
@@ -482,6 +536,58 @@ function isScratchpadPath(absolutePath: string): boolean {
 function pathsEqualForPermission(a: string, b: string): boolean {
   return normalizeCaseForComparison(normalize(a)) ===
     normalizeCaseForComparison(normalize(b))
+}
+
+function pathsEqualForActivePlan(a: string, b: string): boolean {
+  const normalizedA = normalize(a)
+  const normalizedB = normalize(b)
+  return normalizedA === normalizedB
+}
+
+/**
+ * Whether a path resolves exactly to the active plan file for this execution
+ * context. Unlike isSessionPlanFile(), this deliberately does not accept other
+ * agent plan files or files that merely share the current plan slug prefix.
+ */
+export function isActiveSessionPlanFile(
+  path: string,
+  agentId?: ToolUseContext['agentId'],
+): boolean {
+  try {
+    const activePlanPath = getActiveSessionPlanFilePath(agentId)
+    try {
+      const activePlanStats = getFsImplementation().lstatSync(activePlanPath)
+      if (activePlanStats.isSymbolicLink() || !activePlanStats.isFile()) {
+        return false
+      }
+    } catch (error) {
+      if (!isENOENT(error)) return false
+    }
+
+    const expectedForms = getPathsForPermissionCheck(activePlanPath)
+    const targetForms = getPathsForPermissionCheck(expandPath(path))
+
+    return (
+      targetForms.length > 0 &&
+      targetForms.every(target =>
+        expectedForms.some(expected => pathsEqualForActivePlan(target, expected)),
+      )
+    )
+  } catch {
+    return false
+  }
+}
+
+export function getActiveSessionPlanFilePath(
+  agentId?: ToolUseContext['agentId'],
+): string {
+  // Lazy import keeps the permission/filesystem cycle safe and ensures test
+  // harnesses that temporarily replace the plan provider cannot leave a stale
+  // function captured in this module.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getPlanFilePath } =
+    require('../plans.js') as typeof import('../plans.js')
+  return getPlanFilePath(agentId)
 }
 
 export function isOpenClaudeCommitMessagePath(absolutePath: string): boolean {

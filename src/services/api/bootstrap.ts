@@ -28,7 +28,10 @@ import { logForDebugging } from '../../utils/debug.js'
 import { withOAuth401Retry } from '../../utils/http.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { logError } from '../../utils/log.js'
-import { getAPIProvider } from '../../utils/model/providers.js'
+import {
+  getAPIProvider,
+  isFirstPartyAnthropicBaseUrl,
+} from '../../utils/model/providers.js'
 import { isEssentialTrafficOnly } from '../../utils/privacyLevel.js'
 import type { ModelOption } from '../../utils/model/modelOptions.js'
 import {
@@ -133,7 +136,7 @@ async function fetchBootstrapAPI(): Promise<BootstrapResponse | null> {
     return null
   }
 
-  if (getAPIProvider() !== 'firstParty') {
+  if (getAPIProvider() !== 'firstParty' || !isFirstPartyAnthropicBaseUrl()) {
     logForDebugging('[Bootstrap] Skipped: 3P provider')
     return null
   }
@@ -258,35 +261,27 @@ export async function fetchLocalOpenAIModelOptions(
     ? undefined
     : firstUsableCredential(routeCredential)
 
-  // Routes whose catalog declares a public `/models` (discovery.requiresAuth:
-  // false) must not receive credentials on the background probe: drop the
-  // apiKey and any env-sourced custom headers, keeping only the route's own
-  // attribution headers.
-  const discoveryRequiresAuth =
-    !routeId ||
-    getRouteDescriptor(routeId)?.catalog?.discovery?.requiresAuth !== false
-  const discoveryApiKey = discoveryRequiresAuth ? apiKey : undefined
-  const discoveryHeaders = discoveryRequiresAuth
-    ? parseCustomHeadersEnv(process.env.ANTHROPIC_CUSTOM_HEADERS)
-    : undefined
+  const customHeaders = parseCustomHeadersEnv(
+    process.env.ANTHROPIC_CUSTOM_HEADERS,
+  )
   const fallbackHeaders = routeId
-    ? getRouteDiscoveryHeaders(routeId, { headers: discoveryHeaders })
-    : discoveryHeaders
+    ? getRouteDiscoveryHeaders(routeId, { baseUrl, headers: customHeaders })
+    : customHeaders
 
   const discoverModels = deps.discoverModelsForRoute ?? discoverModelsForRoute
   const listModels = deps.listOpenAICompatibleModels ?? listOpenAICompatibleModels
   const discovered = routeId
     ? await discoverModels(routeId, {
         baseUrl,
-        apiKey: discoveryApiKey,
-        headers: discoveryHeaders,
+        apiKey,
+        headers: customHeaders,
       })
     : null
   const models =
     getDiscoveredModelApiNames(discovered) ??
     (await listModels({
       baseUrl,
-      apiKey: discoveryApiKey,
+      apiKey,
       headers: fallbackHeaders,
     }))
 

@@ -197,14 +197,20 @@ export const MAX_MESSAGES_COMPACTION_THRESHOLDS = [
 export type MaxMessagesCompactionThreshold =
   (typeof MAX_MESSAGES_COMPACTION_THRESHOLDS)[number]
 
-export function normalizeMaxMessagesCompactionThreshold(
+export function isValidMaxMessagesCompactionThreshold(
   value: unknown,
-): MaxMessagesCompactionThreshold {
+): value is MaxMessagesCompactionThreshold {
   return MAX_MESSAGES_COMPACTION_THRESHOLDS.includes(
     value as MaxMessagesCompactionThreshold,
   )
+}
+
+export function normalizeMaxMessagesCompactionThreshold(
+  value: unknown,
+): MaxMessagesCompactionThreshold {
+  return isValidMaxMessagesCompactionThreshold(value)
     ? (value as MaxMessagesCompactionThreshold)
-    : 'off'
+    : '200'
 }
 
 export type OutputStyle = string
@@ -221,6 +227,7 @@ export type ProviderProfile = {
   model: string
   apiKey?: string
   apiFormat?: OpenAICompatibleApiFormat
+  azureStyle?: boolean
   authHeader?: string
   authScheme?: OpenAICompatibleAuthScheme
   authHeaderValue?: string
@@ -285,7 +292,13 @@ export type GlobalConfig = {
   hasUsedBackslashReturn?: boolean
   autoCompactEnabled: boolean // Controls whether auto-compact is enabled
   contextCollapseEnabled: boolean // Opt-in: collapse old transcript spans into summaries (lossy; off by default)
-  toolHistoryCompressionEnabled: boolean // Compress old tool_result content for small-context providers
+  toolHistoryCompressionEnabled: boolean // Compress old tool_result content (shim providers; Anthropic-native only while prompt caching is inactive)
+  compactTailTurns?: number // Recent messages preserved verbatim by auto-compact's relevance pruning (default: 3)
+  /**
+   * Per-prompt local interactive REPL turn cap (default: 50).
+   * Overridden by CLI `--max-turns` and OPENCLAUDE_MAX_TURNS / CLAUDE_CODE_MAX_TURNS.
+   */
+  replMaxTurns?: number
   showTurnDuration: boolean // Controls whether to show turn duration message (e.g., "Cooked for 1m 6s")
   // Controls whether to show per-query cache hit/miss stats at the end of each turn.
   // 'off'     — no display
@@ -681,7 +694,7 @@ export type GlobalConfig = {
   logoColor?: string
 
   // Message-count-based compaction threshold. Set via /config.
-  // 'off' = disabled (default). Otherwise, one of '100', '200', '500', '1000'.
+  // 'off' = disabled. Otherwise, one of '100', '200', '500', '1000'.
   // When enabled, triggers forced compaction if the message count exceeds the
   // chosen threshold, regardless of token usage.
   maxMessagesCompactionThreshold?: MaxMessagesCompactionThreshold
@@ -741,8 +754,9 @@ function createDefaultGlobalConfig(): GlobalConfig {
     openaiAdditionalModelOptionsCacheByProfile: {},
     knowledgeGraphEnabled: true,
     // Omitted by default so callers can distinguish "unset" from an explicit
-    // persisted "off"; normalizeMaxMessagesCompactionThreshold keeps the
-    // effective default disabled.
+    // persisted "off"; normalizeMaxMessagesCompactionThreshold resolves an
+    // unset value to the effective default of '200' (message-count compaction
+    // enabled at 200 messages) to bound per-turn latency growth (issue #1949).
   }
   return config
 }
@@ -761,6 +775,8 @@ export const GLOBAL_CONFIG_KEYS = [
   'editorMode',
   'hasUsedBackslashReturn',
   'autoCompactEnabled',
+  'compactTailTurns',
+  'replMaxTurns',
   'contextCollapseEnabled',
   'toolHistoryCompressionEnabled',
   'showTurnDuration',
@@ -1153,9 +1169,12 @@ registerCleanup(async () => {
  */
 function migrateConfigFields(config: GlobalConfig): GlobalConfig {
   const { maxMessagesCompactionThreshold, ...restConfig } = config
+  const hasValidMaxMessagesCompactionThreshold =
+    maxMessagesCompactionThreshold !== undefined &&
+    isValidMaxMessagesCompactionThreshold(maxMessagesCompactionThreshold)
   const normalizedConfig = {
     ...restConfig,
-    ...(maxMessagesCompactionThreshold === undefined
+    ...(!hasValidMaxMessagesCompactionThreshold
       ? {}
       : {
           maxMessagesCompactionThreshold:

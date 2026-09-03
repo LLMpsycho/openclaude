@@ -1,7 +1,11 @@
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import { getInitialMainLoopModel } from '../../bootstrap/state.js'
 import { getCatalogEntriesForRoute } from '../../integrations/index.js'
-import { resolveRouteIdFromBaseUrl } from '../../integrations/routeMetadata.js'
+import {
+  getTransportKindForRoute,
+  resolveActiveRouteIdFromEnv,
+  resolveRouteIdFromBaseUrl,
+} from '../../integrations/routeMetadata.js'
 import {
   getAdditionalModelOptionsCacheScope,
   resolveProviderRequest,
@@ -12,15 +16,15 @@ import {
   isTeamPremiumSubscriber,
 } from '../auth.js'
 import { getModelStrings } from './modelStrings.js'
-import {
-  COST_TIER_3_15,
-  COST_HAIKU_35,
-  COST_HAIKU_45,
-  formatModelPricing,
-} from '../modelCost.js'
+import { getModelPricingString } from '../modelCost.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
 import { checkOpus1mAccess, checkSonnet1mAccess } from './check1mAccess.js'
-import { getAPIProvider } from './providers.js'
+import {
+  getAPIProvider,
+  isCustomAnthropicProvider,
+  isFirstPartyAnthropicBaseUrl,
+  isFirstPartyAnthropicProvider,
+} from './providers.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import {
   getCanonicalName,
@@ -141,12 +145,14 @@ function getScopedAdditionalModelOptions(): ModelOption[] {
 }
 
 export function getDefaultOptionForUser(fastMode = false): ModelOption {
-  const is3P = getAPIProvider() !== 'firstParty'
+  const is3P = !isFirstPartyAnthropicProvider()
+  const currentDefaultModel =
+    isCustomAnthropicProvider() && process.env.ANTHROPIC_MODEL
+      ? process.env.ANTHROPIC_MODEL
+      : getDefaultMainLoopModelSetting()
 
-  if (process.env.USER_TYPE === 'ant') {
-    const currentModel = renderDefaultModelSetting(
-      getDefaultMainLoopModelSetting(),
-    )
+  if (process.env.USER_TYPE === 'ant' && !is3P) {
+    const currentModel = renderDefaultModelSetting(currentDefaultModel)
     return {
       value: null,
       label: 'Default (recommended)',
@@ -159,7 +165,7 @@ export function getDefaultOptionForUser(fastMode = false): ModelOption {
     return {
       value: null,
       label: 'Default (recommended)',
-      description: `Use the default model (currently ${renderDefaultModelSetting(getDefaultMainLoopModelSetting())})`,
+      description: `Use the default model (currently ${renderDefaultModelSetting(currentDefaultModel)})`,
     }
   }
 
@@ -176,8 +182,14 @@ export function getDefaultOptionForUser(fastMode = false): ModelOption {
   return {
     value: null,
     label: 'Default (recommended)',
-    description: `Use the default model (currently ${renderDefaultModelSetting(getDefaultMainLoopModelSetting())})${is3P ? '' : ` · ${formatModelPricing(COST_TIER_3_15)}`}`,
+    description: `Use the default model (currently ${renderDefaultModelSetting(currentDefaultModel)})${getPricingSuffix(getDefaultSonnetModel())}`,
   }
+}
+
+function getPricingSuffix(model: string): string {
+  if (!isFirstPartyAnthropicProvider()) return ''
+  const pricing = getModelPricingString(model)
+  return pricing ? ` · ${pricing}` : ''
 }
 
 function getCustomSonnetOption(): ModelOption | undefined {
@@ -205,7 +217,7 @@ function getSonnet46Option(): ModelOption {
   return {
     value: is3P ? getModelStrings().sonnet46 : 'sonnet',
     label: 'Sonnet',
-    description: `Sonnet 4.6 · Best for everyday tasks${is3P ? '' : ` · ${formatModelPricing(COST_TIER_3_15)}`}`,
+    description: `Sonnet 4.6 · Best for everyday tasks${getPricingSuffix(getModelStrings().sonnet46)}`,
     descriptionForModel:
       'Sonnet 4.6 - best for everyday tasks. Generally recommended for most coding tasks',
   }
@@ -242,7 +254,7 @@ function getOpus48Option(fastMode = false): ModelOption {
   return {
     value: is3P ? getModelStrings().opus48 : 'opus',
     label: 'Opus',
-    description: `Opus 4.8 · Most capable for complex work${getOpus46PricingSuffix(fastMode)}`,
+    description: `Opus 4.8 · Most capable for complex work${getOpus46PricingSuffix(fastMode, getModelStrings().opus48)}`,
     descriptionForModel: 'Opus 4.8 - most capable for complex work',
   }
 }
@@ -252,7 +264,7 @@ function getOpus47Option(fastMode = false): ModelOption {
   return {
     value: is3P ? getModelStrings().opus47 : 'opus',
     label: 'Opus',
-    description: `Opus 4.7 · Most capable for complex work${getOpus46PricingSuffix(fastMode)}`,
+    description: `Opus 4.7 · Most capable for complex work${getOpus46PricingSuffix(fastMode, getModelStrings().opus47)}`,
     descriptionForModel: 'Opus 4.7 - most capable for complex work',
   }
 }
@@ -262,7 +274,7 @@ function getOpus46Option(fastMode = false): ModelOption {
   return {
     value: is3P ? getModelStrings().opus46 : 'opus',
     label: 'Opus',
-    description: `Opus 4.6 · Most capable for complex work${getOpus46PricingSuffix(fastMode)}`,
+    description: `Opus 4.6 · Most capable for complex work${getOpus46PricingSuffix(fastMode, getModelStrings().opus46)}`,
     descriptionForModel: 'Opus 4.6 - most capable for complex work',
   }
 }
@@ -272,7 +284,7 @@ export function getSonnet46_1MOption(): ModelOption {
   return {
     value: is3P ? getModelStrings().sonnet46 + '[1m]' : 'sonnet[1m]',
     label: 'Sonnet (1M context)',
-    description: `Sonnet 4.6 for long sessions${is3P ? '' : ` · ${formatModelPricing(COST_TIER_3_15)}`}`,
+    description: `Sonnet 4.6 for long sessions${getPricingSuffix(getModelStrings().sonnet46)}`,
     descriptionForModel:
       'Sonnet 4.6 with 1M context window - for long sessions with large codebases',
   }
@@ -286,7 +298,7 @@ export function getOpus46_1MOption(fastMode = false): ModelOption {
   return {
     value: is3P ? getModelStrings().opus46 + '[1m]' : 'opus[1m]',
     label: 'Opus (1M context)',
-    description: `${opusName} for long sessions${getOpus46PricingSuffix(fastMode)}`,
+    description: `${opusName} for long sessions${getOpus46PricingSuffix(fastMode, is3P ? getModelStrings().opus46 : getModelStrings().opus48)}`,
     descriptionForModel: `${opusName} with 1M context window - for long sessions with large codebases`,
   }
 }
@@ -308,22 +320,20 @@ function getCustomHaikuOption(): ModelOption | undefined {
 }
 
 function getHaiku45Option(): ModelOption {
-  const is3P = getAPIProvider() !== 'firstParty'
   return {
     value: 'haiku',
     label: 'Haiku',
-    description: `Haiku 4.5 · Fastest for quick answers${is3P ? '' : ` · ${formatModelPricing(COST_HAIKU_45)}`}`,
+    description: `Haiku 4.5 · Fastest for quick answers${getPricingSuffix(getModelStrings().haiku45)}`,
     descriptionForModel:
       'Haiku 4.5 - fastest for quick answers. Lower cost but less capable than Sonnet 4.6.',
   }
 }
 
 function getHaiku35Option(): ModelOption {
-  const is3P = getAPIProvider() !== 'firstParty'
   return {
     value: 'haiku',
     label: 'Haiku',
-    description: `Haiku 3.5 for simple tasks${is3P ? '' : ` · ${formatModelPricing(COST_HAIKU_35)}`}`,
+    description: `Haiku 3.5 for simple tasks${getPricingSuffix(getModelStrings().haiku35)}`,
     descriptionForModel:
       'Haiku 3.5 - faster and lower cost, but less capable than Sonnet. Use for simple tasks.',
   }
@@ -341,17 +351,16 @@ function getMaxOpusOption(fastMode = false): ModelOption {
   return {
     value: 'opus',
     label: 'Opus',
-    description: `Opus 4.8 · Most capable for complex work${fastMode ? getOpus46PricingSuffix(true) : ''}`,
+    description: `Opus 4.8 · Most capable for complex work${fastMode ? getOpus46PricingSuffix(true, getModelStrings().opus48) : ''}`,
   }
 }
 
 export function getMaxSonnet46_1MOption(): ModelOption {
-  const is3P = getAPIProvider() !== 'firstParty'
   const billingInfo = isClaudeAISubscriber() ? ' · Billed as extra usage' : ''
   return {
     value: 'sonnet[1m]',
     label: 'Sonnet (1M context)',
-    description: `Sonnet 4.6 with 1M context${billingInfo}${is3P ? '' : ` · ${formatModelPricing(COST_TIER_3_15)}`}`,
+    description: `Sonnet 4.6 with 1M context${billingInfo}${getPricingSuffix(getModelStrings().sonnet46)}`,
   }
 }
 
@@ -360,7 +369,7 @@ export function getMaxOpus46_1MOption(fastMode = false): ModelOption {
   return {
     value: 'opus[1m]',
     label: 'Opus (1M context)',
-    description: `Opus 4.8 with 1M context${billingInfo}${getOpus46PricingSuffix(fastMode)}`,
+    description: `Opus 4.8 with 1M context${billingInfo}${getOpus46PricingSuffix(fastMode, getModelStrings().opus48)}`,
   }
 }
 
@@ -369,7 +378,7 @@ function getMergedOpus1MOption(fastMode = false): ModelOption {
   return {
     value: is3P ? getModelStrings().opus46 + '[1m]' : 'opus[1m]',
     label: 'Opus (1M context)',
-    description: `${is3P ? 'Opus 4.6' : 'Opus 4.8'} with 1M context · Most capable for complex work${!is3P && fastMode ? getOpus46PricingSuffix(fastMode) : ''}`,
+    description: `${is3P ? 'Opus 4.6' : 'Opus 4.8'} with 1M context · Most capable for complex work${!is3P && fastMode ? getOpus46PricingSuffix(fastMode, getModelStrings().opus48) : ''}`,
     descriptionForModel:
       `${is3P ? 'Opus 4.6' : 'Opus 4.8'} with 1M context - most capable for complex work`,
   }
@@ -413,6 +422,21 @@ function getCodexSparkOption(): ModelOption {
 
 function getCodexModelOptions(): ModelOption[] {
   return [
+    {
+      value: 'gpt-5.6-sol',
+      label: 'gpt-5.6-sol',
+      description: 'GPT-5.6 Sol · Flagship for complex work, high reasoning',
+    },
+    {
+      value: 'gpt-5.6-terra',
+      label: 'gpt-5.6-terra',
+      description: 'GPT-5.6 Terra · Balanced everyday workhorse',
+    },
+    {
+      value: 'gpt-5.6-luna',
+      label: 'gpt-5.6-luna',
+      description: 'GPT-5.6 Luna · Fast and cost-effective',
+    },
     {
       value: 'gpt-5.5',
       label: 'gpt-5.5',
@@ -572,6 +596,28 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     return [defaultOption, ...inactiveProfileOptions]
   }
 
+  const activeProfile = getActiveProviderProfile()
+  const activeRouteId = resolveActiveRouteIdFromEnv(process.env, {
+    activeProfileProvider: activeProfile?.provider,
+    activeProfileBaseUrl: activeProfile?.baseUrl,
+  })
+  if (getTransportKindForRoute(activeRouteId ?? '') === 'anthropic-proxy') {
+    const directEnvOption =
+      profileModelOptions.length === 0 && process.env.ANTHROPIC_MODEL
+        ? [{
+            value: process.env.ANTHROPIC_MODEL,
+            label: process.env.ANTHROPIC_MODEL,
+            description: 'Custom Anthropic-compatible endpoint',
+          }]
+        : []
+    return [
+      getDefaultOptionForUser(fastMode),
+      ...profileModelOptions,
+      ...directEnvOption,
+      ...inactiveProfileOptions,
+    ]
+  }
+
   if (process.env.USER_TYPE === 'ant') {
     // Build options from antModels config
     const antModelOptions: ModelOption[] = getAntModels().map(m => ({
@@ -634,7 +680,6 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   // other configured profile while a local/route profile is active (#1119).
   const activeRouteCatalogOptions = getActiveOpenAIRouteCatalogOptions()
   const openAIModelOptionsScope = getAdditionalModelOptionsCacheScope()
-  const activeProfile = getActiveProviderProfile()
   if (
     activeRouteCatalogOptions.length > 0 ||
     openAIModelOptionsScope?.startsWith('openai:')
@@ -659,7 +704,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
   }
 
   // PAYG 1P API: Default (Sonnet) + Sonnet 1M + Opus 4.8 + Opus 4.7 + Opus 4.6 + Opus 1M + Haiku
-  if (getAPIProvider() === 'firstParty') {
+  if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
     const payg1POptions = [getDefaultOptionForUser(fastMode)]
     if (checkSonnet1mAccess()) {
       payg1POptions.push(getSonnet46_1MOption())
@@ -891,14 +936,45 @@ function mergeModelOptionsByNormalizedValue(
   return merged
 }
 
+/**
+ * ApiNames that appear more than once in the catalog (case-insensitive, after
+ * trimming). Computed once up front so `getCatalogOptionValue` is O(1) per
+ * entry instead of re-scanning the whole catalog for every entry — catalogs
+ * with hundreds of models (e.g. Fireworks) would otherwise make this O(n²).
+ */
+function getDuplicateCatalogApiNames(
+  entries: readonly { apiName: string }[],
+): Set<string> {
+  const counts = new Map<string, number>()
+  for (const entry of entries) {
+    const key = entry.apiName.trim().toLowerCase()
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  const duplicates = new Set<string>()
+  for (const [key, count] of counts) {
+    if (count > 1) {
+      duplicates.add(key)
+    }
+  }
+  return duplicates
+}
+
+function getCatalogOptionValue(entry: { id: string; apiName: string }, duplicateApiNames: Set<string>): string {
+  const apiName = entry.apiName.trim()
+  const duplicateApiName = duplicateApiNames.has(apiName.toLowerCase())
+  return duplicateApiName ? entry.id.trim() : apiName
+}
+
 function getActiveOpenAIRouteCatalogOptions(): ModelOption[] {
   const routeId = getActiveOpenAIRouteId()
   if (!routeId) {
     return []
   }
 
-  return getCatalogEntriesForRoute(routeId).flatMap(entry => {
-    const value = entry.apiName.trim()
+  const entries = getCatalogEntriesForRoute(routeId)
+  const duplicateApiNames = getDuplicateCatalogApiNames(entries)
+  return entries.flatMap(entry => {
+    const value = getCatalogOptionValue(entry, duplicateApiNames)
     if (!value) {
       return []
     }
@@ -911,13 +987,36 @@ function getActiveOpenAIRouteCatalogOptions(): ModelOption[] {
   })
 }
 
-function getRouteCatalogModelOption(value: ModelSetting): ModelOption | null {
-  if (typeof value !== 'string') {
-    return null
-  }
+/**
+ * Route-catalog lookup state for one `getModelOptions()` build. Resolving the
+ * route id, fetching its catalog entries, and computing the duplicate-apiName
+ * set are all O(catalog size) — rebuilding them for every check would make
+ * builds with several catalog lookups (env custom model, each scoped
+ * additional option, the active custom model) repeatedly rescan the whole
+ * catalog. Built once per options build and shared across all lookups.
+ */
+type RouteCatalogContext = {
+  entries: ReturnType<typeof getCatalogEntriesForRoute>
+  duplicateApiNames: Set<string>
+}
 
+function getRouteCatalogContext(): RouteCatalogContext | null {
   const routeId = getActiveOpenAIRouteId()
   if (!routeId) {
+    return null
+  }
+  const entries = getCatalogEntriesForRoute(routeId)
+  return {
+    entries,
+    duplicateApiNames: getDuplicateCatalogApiNames(entries),
+  }
+}
+
+function findRouteCatalogOption(
+  context: RouteCatalogContext | null,
+  value: ModelSetting,
+): ModelOption | null {
+  if (!context || typeof value !== 'string') {
     return null
   }
 
@@ -926,7 +1025,7 @@ function getRouteCatalogModelOption(value: ModelSetting): ModelOption | null {
     return null
   }
 
-  const catalogEntry = getCatalogEntriesForRoute(routeId).find(entry =>
+  const catalogEntry = context.entries.find(entry =>
     normalizeRouteModelOptionKey(entry.apiName) === normalizedValue ||
     normalizeRouteModelOptionKey(entry.id) === normalizedValue ||
     (entry.aliases ?? []).some(
@@ -938,19 +1037,33 @@ function getRouteCatalogModelOption(value: ModelSetting): ModelOption | null {
   }
 
   return {
-    value: catalogEntry.apiName,
+    value: getCatalogOptionValue(catalogEntry, context.duplicateApiNames),
     label: catalogEntry.label ?? catalogEntry.apiName,
     description: catalogEntry.apiName,
   }
 }
 
-function optionMatchesModel(option: ModelOption, model: ModelSetting): boolean {
-  if (option.value === model) {
+/**
+ * True when `value` (or its canonical route-catalog entry) already appears in
+ * `options`. The catalog lookup is hoisted out of the per-option loop — with
+ * large static catalogs (e.g. Fireworks' ~280 entries) the previous
+ * `options.some(optionMatchesModel)` re-ran the catalog scan for every option,
+ * making each `getModelOptions()` call O(n²) and the `/model` picker lag on
+ * every keystroke.
+ */
+function hasOptionValue(
+  options: ModelOption[],
+  value: ModelSetting,
+  getRouteCatalogContext: () => RouteCatalogContext | null,
+): boolean {
+  if (options.some(option => option.value === value)) {
     return true
   }
-
-  const catalogOption = getRouteCatalogModelOption(model)
-  return catalogOption !== null && option.value === catalogOption.value
+  const catalogOption = findRouteCatalogOption(getRouteCatalogContext(), value)
+  return (
+    catalogOption !== null &&
+    options.some(option => option.value === catalogOption.value)
+  )
 }
 
 export function getModelOptions(fastMode = false): ModelOption[] {
@@ -960,11 +1073,25 @@ export function getModelOptions(fastMode = false): ModelOption[] {
 
   const options = getModelOptionsBase(fastMode)
 
+  // Route-catalog lookup state is built once per options build (on first use)
+  // and shared by every catalog check below, so repeated lookups — the env
+  // custom model, each scoped additional option, and the active custom model —
+  // don't each rescan the full catalog and rebuild the duplicate-apiName set.
+  let routeCatalogContextBuilt = false
+  let routeCatalogContext: RouteCatalogContext | null = null
+  const getSharedRouteCatalogContext = (): RouteCatalogContext | null => {
+    if (!routeCatalogContextBuilt) {
+      routeCatalogContextBuilt = true
+      routeCatalogContext = getRouteCatalogContext()
+    }
+    return routeCatalogContext
+  }
+
   // Add the custom model from the ANTHROPIC_CUSTOM_MODEL_OPTION env var
   const envCustomModel = process.env.ANTHROPIC_CUSTOM_MODEL_OPTION
   if (
     envCustomModel &&
-    !options.some(existing => optionMatchesModel(existing, envCustomModel))
+    !hasOptionValue(options, envCustomModel, getSharedRouteCatalogContext)
   ) {
     options.push({
       value: envCustomModel,
@@ -977,10 +1104,13 @@ export function getModelOptions(fastMode = false): ModelOption[] {
 
   // Append additional model options fetched during bootstrap
   for (const opt of getScopedAdditionalModelOptions()) {
-    const catalogOption = getRouteCatalogModelOption(opt.value)
+    const catalogOption = findRouteCatalogOption(
+      getSharedRouteCatalogContext(),
+      opt.value,
+    )
     const nextOption = catalogOption ? { ...opt, ...catalogOption } : opt
     if (
-      !options.some(existing => optionMatchesModel(existing, nextOption.value))
+      !hasOptionValue(options, nextOption.value, getSharedRouteCatalogContext)
     ) {
       options.push(nextOption)
     }
@@ -998,7 +1128,7 @@ export function getModelOptions(fastMode = false): ModelOption[] {
   }
   if (
     customModel === null ||
-    options.some(opt => optionMatchesModel(opt, customModel))
+    hasOptionValue(options, customModel, getSharedRouteCatalogContext)
   ) {
     return filterModelOptionsByAllowlist(options)
   } else if (customModel === 'opusplan') {
@@ -1007,18 +1137,41 @@ export function getModelOptions(fastMode = false): ModelOption[] {
     return filterModelOptionsByAllowlist([...options, getCodexPlanOption()])
   } else if (customModel === 'gpt-5.3-codex-spark') {
     return filterModelOptionsByAllowlist([...options, getCodexSparkOption()])
-  } else if (customModel === 'opus' && getAPIProvider() === 'firstParty') {
+  }
+
+  // Persisted Codex model while a non-Codex provider is active (the Codex
+  // options were not appended above): surface the curated option instead
+  // of a generic "Custom model" entry, mirroring the gpt-5.5/spark cases
+  // for every Codex picker model. Match on the [1m]-stripped base so a
+  // tagged pick still gets its curated entry, but keep the persisted value
+  // on the option so selection matching stays exact.
+  const customCodexBase = customModel.replace(/\[1m]$/i, '')
+  const customCodexOption = getCodexModelOptions().find(
+    opt => opt.value === customCodexBase,
+  )
+  if (customCodexOption) {
+    return filterModelOptionsByAllowlist([
+      ...options,
+      customCodexBase === customModel
+        ? customCodexOption
+        : { ...customCodexOption, value: customModel },
+    ])
+  }
+  if (customModel === 'opus' && getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
     return filterModelOptionsByAllowlist([
       ...options,
       getMaxOpusOption(fastMode),
     ])
-  } else if (customModel === 'opus[1m]' && getAPIProvider() === 'firstParty') {
+  } else if (customModel === 'opus[1m]' && getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
     return filterModelOptionsByAllowlist([
       ...options,
       getMergedOpus1MOption(fastMode),
     ])
   } else {
-    const catalogOption = getRouteCatalogModelOption(customModel)
+    const catalogOption = findRouteCatalogOption(
+      getSharedRouteCatalogContext(),
+      customModel,
+    )
     if (catalogOption) {
       options.push(catalogOption)
       return filterModelOptionsByAllowlist(options)

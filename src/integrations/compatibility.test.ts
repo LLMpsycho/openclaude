@@ -5,6 +5,7 @@ import {
   getGateway,
   getModelsForGateway,
   getVendor,
+  ORDERED_PROVIDER_PRESETS,
 } from './index.js'
 import {
   PRESET_VENDOR_MAP,
@@ -18,6 +19,7 @@ import type { ProviderPreset } from '../utils/providerProfiles.js'
 const EXPECTED_PRESETS = [
   'anthropic',
   'atlas-cloud',
+  'apismart',
   'aimlapi',
   'openai',
   'ollama',
@@ -35,6 +37,7 @@ const EXPECTED_PRESETS = [
   'dashscope-cn',
   'dashscope-intl',
   'custom',
+  'custom-anthropic',
   'nvidia-nim',
   'minimax',
   'xai',
@@ -46,8 +49,11 @@ const EXPECTED_PRESETS = [
   'atomic-chat',
   'cloudflare',
   'gitlawb-opengateway',
+  'concentrate',
   'nearai',
   'fireworks',
+  'longcat',
+  'llmtr',
   'opencode',
   'opencode-go',
   'clinepass',
@@ -76,7 +82,9 @@ describe('compatibility mappings', () => {
 
       expect(route.vendorId).toBe(vendorId)
       expect(route.gatewayId).toBe(gatewayId)
-      expect(route.routeId).toBe(gatewayId ?? vendorId)
+      expect(route.routeId).toBe(
+        preset === 'custom-anthropic' ? 'custom-anthropic' : gatewayId ?? vendorId,
+      )
     }
   })
 
@@ -93,6 +101,24 @@ describe('compatibility mappings', () => {
       gatewayId: 'atlas-cloud',
       routeId: 'atlas-cloud',
     })
+  })
+
+  test('Custom Anthropic is modeled as an Anthropic proxy', () => {
+    expect(routeForPreset('custom-anthropic')).toEqual({
+      vendorId: 'anthropic',
+      routeId: 'custom-anthropic',
+    })
+    expect(resolveProfileRoute('custom-anthropic')).toEqual({
+      vendorId: 'anthropic',
+      routeId: 'custom-anthropic',
+    })
+  })
+
+  test('keeps custom provider presets at the bottom of the add-provider list', () => {
+    expect(ORDERED_PROVIDER_PRESETS.slice(-2)).toEqual([
+      'custom',
+      'custom-anthropic',
+    ])
   })
 
   test('Atlas Cloud gateway models do not resolve to NearAI-scoped descriptors', () => {

@@ -19,6 +19,7 @@ import {
 } from './registry.js'
 import {
   getRouteDescriptor,
+  isCanonicalXaiInferenceBaseUrl,
   resolveRouteCredentialValue,
   resolveActiveRouteIdFromEnv,
   resolveRouteIdFromBaseUrl,
@@ -27,6 +28,24 @@ import {
 import { parseCustomHeadersEnv } from '../utils/providerCustomHeaders.js'
 import { firstUsableCredential } from '../services/api/credentialPool.js'
 import { ZAI_GLM_OPENAI_SHIM } from './transport/zaiGlmShim.js'
+import {
+  getCachedXaiCredentials,
+  getXaiDiscoveryCacheIdentity,
+} from '../utils/xaiCredentials.js'
+import { resolveAimlapiAttributionHeaders } from './aimlapi/config.js'
+
+function resolveRouteOpenAIShimConfig(
+  routeId: string | null,
+  baseUrl: string | undefined,
+  config: OpenAIShimTransportConfig,
+): OpenAIShimTransportConfig {
+  if (routeId !== 'aimlapi' || !config.headers) return config
+
+  return {
+    ...config,
+    headers: resolveAimlapiAttributionHeaders(config.headers, baseUrl),
+  }
+}
 
 function normalizeModelApiName(
   value: string | undefined,
@@ -52,7 +71,10 @@ function matchesCatalogEntryModel(
   entry: ModelCatalogEntry,
   modelApiName: string,
 ): boolean {
-  if (entry.apiName.trim().toLowerCase() === modelApiName) {
+  if (
+    entry.apiName.trim().toLowerCase() === modelApiName ||
+    entry.id.trim().toLowerCase() === modelApiName
+  ) {
     return true
   }
 
@@ -122,9 +144,9 @@ function mergeOpenAIShimConfig(
   inferredConfig: Partial<OpenAIShimTransportConfig> | undefined,
 ): OpenAIShimTransportConfig {
   return {
+    ...inferredConfig,
     ...baseConfig,
     ...entryConfig,
-    ...inferredConfig,
     removeBodyFields: mergeRemoveBodyFields(
       baseConfig?.removeBodyFields,
       entryConfig?.removeBodyFields,
@@ -281,6 +303,8 @@ export function resolveOpenAIShimRuntimeContext(options?: {
     routeId && routeId !== 'anthropic'
       ? getRouteDescriptor(routeId)
       : null
+  const effectiveBaseUrl =
+    options?.baseUrl ?? runtimeEnv.OPENAI_BASE_URL ?? runtimeEnv.OPENAI_API_BASE
   const catalogEntry =
     descriptor && routeId
       ? getCatalogEntryForModel(routeId, options?.model)
@@ -296,10 +320,17 @@ export function resolveOpenAIShimRuntimeContext(options?: {
     routeId,
     descriptor,
     catalogEntry,
-    openaiShimConfig: mergeOpenAIShimConfig(
-      descriptor?.transportConfig.openaiShim,
-      catalogEntry?.transportOverrides?.openaiShim,
-      inferredConfig,
+    // Sanitize AIMLAPI attribution headers AFTER merging every layer: a
+    // catalog- or model-level `openaiShim.headers` override could otherwise
+    // reintroduce the partner/attribution headers on a proxy endpoint.
+    openaiShimConfig: resolveRouteOpenAIShimConfig(
+      routeId,
+      effectiveBaseUrl,
+      mergeOpenAIShimConfig(
+        descriptor?.transportConfig.openaiShim,
+        catalogEntry?.transportOverrides?.openaiShim,
+        inferredConfig,
+      ),
     ),
   }
 }
@@ -428,15 +459,22 @@ function findCachedCatalogEntryForApiName(
   }
 
   const baseUrl = runtimeEnv.OPENAI_BASE_URL ?? runtimeEnv.OPENAI_API_BASE
+  let apiKey = firstUsableCredential(
+    resolveRouteCredentialValue({ routeId, baseUrl, processEnv: runtimeEnv }),
+  )
+  let cacheIdentity: string | undefined
+  if (!apiKey && routeId === 'xai' && isCanonicalXaiInferenceBaseUrl(baseUrl)) {
+    // Runtime limit resolution is synchronous request planning. Discovery
+    // populates this memory cache asynchronously; do not launch a credential
+    // store subprocess here merely to recover optional dynamic metadata.
+    const credentials = getCachedXaiCredentials()
+    apiKey = firstUsableCredential(credentials?.accessToken)
+    cacheIdentity = getXaiDiscoveryCacheIdentity(credentials) ?? apiKey
+  }
   const cacheKey = getDiscoveryCacheKey(routeId, {
     baseUrl,
-    apiKey: firstUsableCredential(
-      resolveRouteCredentialValue({
-        routeId,
-        baseUrl,
-        processEnv: runtimeEnv,
-      }),
-    ),
+    apiKey,
+    cacheKey: cacheIdentity,
     headers: parseCustomHeadersEnv(runtimeEnv.ANTHROPIC_CUSTOM_HEADERS),
   })
   const cached = getCachedModelsSync(cacheKey, getDiscoveryCacheTtlMs(routeId))
@@ -453,6 +491,7 @@ export function resolveModelRuntimeLimits(options: {
   processEnv?: NodeJS.ProcessEnv
   baseUrl?: string
   activeProfileProvider?: string
+  resolvedRouteId?: string | null
 }): ModelRuntimeLimits {
   const processEnv = options.processEnv ?? process.env
   const runtimeEnv: NodeJS.ProcessEnv = { ...processEnv }
@@ -460,10 +499,12 @@ export function resolveModelRuntimeLimits(options: {
     runtimeEnv.OPENAI_BASE_URL = options.baseUrl
   }
 
-  const routeId = resolveActiveRouteIdFromEnv(runtimeEnv, {
-    activeProfileProvider: options?.activeProfileProvider,
-    activeProfileBaseUrl: options?.baseUrl,
-  })
+  const routeId = options.resolvedRouteId !== undefined
+    ? options.resolvedRouteId
+    : resolveActiveRouteIdFromEnv(runtimeEnv, {
+      activeProfileProvider: options?.activeProfileProvider,
+      activeProfileBaseUrl: options?.baseUrl,
+    })
   const modelApiName = getBaseModelApiName(options.model) ?? options.model
   const catalogEntry = findCatalogEntryForApiName(routeId, modelApiName)
   const cachedCatalogEntry = findCachedCatalogEntryForApiName(
@@ -471,10 +512,16 @@ export function resolveModelRuntimeLimits(options: {
     modelApiName,
     runtimeEnv,
   )
-  const modelDescriptor =
+  const catalogModelDescriptor =
     getModelDescriptorForCatalogEntry(catalogEntry) ??
-    getModelDescriptorForCatalogEntry(cachedCatalogEntry) ??
+    getModelDescriptorForCatalogEntry(cachedCatalogEntry)
+  const inferredModelDescriptor =
     findModelDescriptorForApiName(routeId, modelApiName)
+  const modelDescriptor =
+    catalogModelDescriptor ??
+    (inferredModelDescriptor?.runtimeMetadataScope === 'catalog'
+      ? null
+      : inferredModelDescriptor)
   const externalContextWindow = getOpenAIContextWindowMatches(
     modelApiName,
     runtimeEnv,

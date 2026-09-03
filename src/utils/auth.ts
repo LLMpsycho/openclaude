@@ -10,7 +10,10 @@ import {
   logEvent,
 } from 'src/services/analytics/index.js'
 import { getModelStrings } from 'src/utils/model/modelStrings.js'
-import { getAPIProvider } from 'src/utils/model/providers.js'
+import {
+  getAPIProvider,
+  isFirstPartyAnthropicBaseUrl,
+} from 'src/utils/model/providers.js'
 import {
   getIsNonInteractiveSession,
   preferThirdPartyAuthentication,
@@ -82,17 +85,15 @@ import { clearToolSchemaCache } from './toolSchemaCache.js'
 const DEFAULT_API_KEY_HELPER_TTL = 5 * 60 * 1000
 
 /**
- * CCR and Claude Desktop spawn the CLI with OAuth and should never fall back
- * to the user's ~/.claude/settings.json API-key config (apiKeyHelper,
- * env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN). Those settings exist for
- * the user's terminal CLI, not managed sessions. Without this guard, a user
- * who runs `claude` in their terminal with an API key sees every CCD session
- * also use that key — and fail if it's stale/wrong-org.
+ * Managed launchers and the SSH auth proxy own the effective OAuth credential
+ * and must not inherit the user's terminal API-key configuration.
  */
-function isManagedOAuthContext(): boolean {
+export function isManagedOAuthContext(): boolean {
   return (
     isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) ||
-    process.env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop'
+    process.env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop' ||
+    (!!process.env.ANTHROPIC_UNIX_SOCKET &&
+      !!process.env.CLAUDE_CODE_OAUTH_TOKEN)
   )
 }
 
@@ -1918,7 +1919,7 @@ export type UserAccountInfo = {
 export function getAccountInformation() {
   const apiProvider = getAPIProvider()
   // Only provide account info for first-party Anthropic API
-  if (apiProvider !== 'firstParty') {
+  if (apiProvider !== 'firstParty' || !isFirstPartyAnthropicBaseUrl()) {
     return undefined
   }
   const { source: authTokenSource } = getAuthTokenSource()
